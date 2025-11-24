@@ -2,7 +2,7 @@ name: Flutter Web Deploy
 
 on:
   push:
-    branches: [ "main" ]        # chỉ chạy khi có code mới trên main (tức là merge về main)
+    branches: [ "main" ]        # mỗi lần merge/push vào main là chạy
 
 permissions:
   contents: write
@@ -18,7 +18,7 @@ jobs:
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.32.8'
+          flutter-version: '3.32.8'   # đúng version bạn đang dùng
           channel: 'stable'
 
       - name: Clean previous build
@@ -28,13 +28,13 @@ jobs:
         run: flutter pub get
 
       - name: Build Flutter Web
-        # nếu repo là dạng username.github.io thì để "/"
-        # nếu là repo bình thường (vd: my_flutter_web) thì dùng "/my_flutter_web/"
+        # repo tên portal_log => base-href nên là /portal_log/
         run: flutter build web --release --base-href="/portal_log/"
 
       - name: Deploy to GitHub Pages
         uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./build/web
-          publish_branch: gh-pages
+          publish_dir: ./build/web     # chỗ flutter build web xuất ra
+          publish_branch: gh-pages     # đẩy kết quả lên branch gh-pages
+          force_orphan: true           # cho nhánh gh-pages chỉ chứa file build
