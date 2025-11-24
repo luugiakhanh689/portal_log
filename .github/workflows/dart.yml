@@ -1,0 +1,40 @@
+name: Flutter Web Deploy
+
+on:
+  push:
+    branches: [ "main" ]        # chỉ chạy khi có code mới trên main (tức là merge về main)
+
+permissions:
+  contents: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.32.8'
+          channel: 'stable'
+
+      - name: Clean previous build
+        run: flutter clean
+
+      - name: Get dependencies
+        run: flutter pub get
+
+      - name: Build Flutter Web
+        # nếu repo là dạng username.github.io thì để "/"
+        # nếu là repo bình thường (vd: my_flutter_web) thì dùng "/my_flutter_web/"
+        run: flutter build web --release --base-href="/portal_log/"
+
+      - name: Deploy to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./build/web
+          publish_branch: gh-pages
