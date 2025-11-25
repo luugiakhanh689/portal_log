@@ -4,11 +4,52 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:intl/intl.dart';
-import 'package:portal_log/heartbeat_log_entry.dart';
 
 void main() {
   runApp(const MyApp());
 }
+
+// ================== MODEL ==================
+
+class HeartbeatLogEntry {
+  final int id;
+  final String createdAt;
+  final String userId;
+  final String message;
+  final int genTime; // timestamp (seconds)
+
+  HeartbeatLogEntry({
+    required this.id,
+    required this.createdAt,
+    required this.userId,
+    required this.message,
+    required this.genTime,
+  });
+
+  // Convert gen_time (seconds) -> DateTime
+  DateTime get genTimeDateTime => DateTime.fromMillisecondsSinceEpoch(
+    genTime * 1000,
+    isUtc: true,
+  ).toLocal();
+
+  // Convert gen_time -> string datetime
+  String get genTimeFormatted {
+    final dt = genTimeDateTime;
+    return DateFormat('yyyy-MM-dd HH:mm:ss').format(dt);
+  }
+
+  factory HeartbeatLogEntry.fromJson(Map<String, dynamic> json) {
+    return HeartbeatLogEntry(
+      id: int.parse(json['id'] as String),
+      createdAt: json['created_at'] as String,
+      userId: json['user_id'] as String,
+      message: json['message'] as String,
+      genTime: int.parse(json['gen_time'] as String),
+    );
+  }
+}
+
+// ================== APP ==================
 
 class MyApp extends StatelessWidget {
   const MyApp({super.key});
@@ -50,6 +91,10 @@ class _LogPageState extends State<LogPage> {
   // Loading state
   bool _isLoading = false;
 
+  // GenTime datetime range filter
+  DateTime? _fromGenDateTime;
+  DateTime? _toGenDateTime;
+
   @override
   void initState() {
     super.initState();
@@ -90,6 +135,8 @@ class _LogPageState extends State<LogPage> {
       _logs = [];
       _currentPage = 0;
       _isLoading = true;
+      _fromGenDateTime = null;
+      _toGenDateTime = null;
     });
 
     try {
@@ -177,6 +224,9 @@ class _LogPageState extends State<LogPage> {
     }
   }
 
+  // ========== Highlight search trong message ==========
+  // Giữ nguyên font & size, chỉ tô nền vàng phần match, và text copy được
+
   Widget _buildHighlightedMessage(String message, TextStyle? cellStyle) {
     final baseStyle = cellStyle ?? DefaultTextStyle.of(context).style;
 
@@ -216,12 +266,161 @@ class _LogPageState extends State<LogPage> {
     return SelectableText.rich(TextSpan(style: baseStyle, children: spans));
   }
 
+  // ========== DateTime range picker cho gen_time (ngày + giờ + phút) ==========
+
+  Future<void> _pickFromGenDateTime() async {
+    if (_isLoading) return;
+
+    final now = DateTime.now();
+    final initial =
+        _fromGenDateTime ??
+        (_logs.isNotEmpty ? _logs.first.genTimeDateTime : now);
+
+    // Bước 1: chọn ngày
+    final pickedDate = await showDatePicker(
+      context: context,
+      initialDate: initial,
+      firstDate: DateTime(2000),
+      lastDate: DateTime(2100),
+    );
+    if (pickedDate == null) return;
+
+    // Bước 2: chọn giờ/phút (24 giờ format)
+    final pickedTime = await showTimePicker(
+      context: context,
+      initialTime: TimeOfDay.fromDateTime(initial),
+    );
+
+    DateTime result;
+    if (pickedTime != null) {
+      result = DateTime(
+        pickedDate.year,
+        pickedDate.month,
+        pickedDate.day,
+        pickedTime.hour,
+        pickedTime.minute,
+      );
+    } else {
+      // nếu cancel time → mặc định 00:00
+      result = DateTime(pickedDate.year, pickedDate.month, pickedDate.day);
+    }
+
+    setState(() {
+      _fromGenDateTime = result;
+      _currentPage = 0;
+    });
+  }
+
+  Future<void> _pickToGenDateTime() async {
+    if (_isLoading) return;
+
+    final now = DateTime.now();
+    final initial =
+        _toGenDateTime ?? (_logs.isNotEmpty ? _logs.last.genTimeDateTime : now);
+
+    // Bước 1: chọn ngày
+    final pickedDate = await showDatePicker(
+      context: context,
+      initialDate: initial,
+      firstDate: DateTime(2000),
+      lastDate: DateTime(2100),
+    );
+    if (pickedDate == null) return;
+
+    // Bước 2: chọn giờ/phút (24 giờ format)
+    final pickedTime = await showTimePicker(
+      context: context,
+      initialTime: TimeOfDay.fromDateTime(initial),
+    );
+
+    DateTime result;
+    if (pickedTime != null) {
+      result = DateTime(
+        pickedDate.year,
+        pickedDate.month,
+        pickedDate.day,
+        pickedTime.hour,
+        pickedTime.minute,
+      );
+    } else {
+      // nếu cancel time → mặc định 23:59
+      result = DateTime(
+        pickedDate.year,
+        pickedDate.month,
+        pickedDate.day,
+        23,
+        59,
+      );
+    }
+
+    setState(() {
+      _toGenDateTime = result;
+      _currentPage = 0;
+    });
+  }
+
+  // Helpers cho các action có loading ngắn (chuyển trang, đổi size, đổi sort)
+
+  Future<void> _changePage(int newPage) async {
+    await _setLoadingForShortAction(() async {
+      setState(() {
+        _currentPage = newPage;
+      });
+      await Future.delayed(const Duration(milliseconds: 150));
+    });
+  }
+
+  Future<void> _changeRowsPerPage(int newSize) async {
+    await _setLoadingForShortAction(() async {
+      setState(() {
+        _rowsPerPage = newSize;
+        _currentPage = 0;
+      });
+      await Future.delayed(const Duration(milliseconds: 150));
+    });
+  }
+
+  Future<void> _toggleSort() async {
+    await _setLoadingForShortAction(() async {
+      setState(() {
+        _sortAscending = !_sortAscending;
+        _currentPage = 0;
+      });
+      await Future.delayed(const Duration(milliseconds: 150));
+    });
+  }
+
+  // ========== UI chính ==========
+
   @override
   Widget build(BuildContext context) {
-    // Filter theo message
+    // Chuẩn bị epoch giây cho from/to để so sánh trực tiếp với gen_time
+    int? fromEpoch;
+    int? toEpoch;
+    if (_fromGenDateTime != null) {
+      fromEpoch = _fromGenDateTime!.toUtc().millisecondsSinceEpoch ~/ 1000;
+    }
+    if (_toGenDateTime != null) {
+      toEpoch = _toGenDateTime!.toUtc().millisecondsSinceEpoch ~/ 1000;
+    }
+
+    // Filter: message + khoảng gen_time (epoch giây)
     final filteredLogs = _logs.where((log) {
-      if (_searchText.isEmpty) return true;
-      return log.message.toLowerCase().contains(_searchText.toLowerCase());
+      // filter theo message
+      if (_searchText.isNotEmpty &&
+          !log.message.toLowerCase().contains(_searchText.toLowerCase())) {
+        return false;
+      }
+
+      // filter theo khoảng gen_time (so sánh giây)
+      if (fromEpoch != null && log.genTime < fromEpoch) {
+        return false;
+      }
+      if (toEpoch != null && log.genTime > toEpoch) {
+        return false;
+      }
+
+      return true;
     }).toList();
 
     // Sort theo genTime
@@ -252,6 +451,8 @@ class _LogPageState extends State<LogPage> {
       pageLogs = filteredLogs.sublist(startIndex, endIndex);
     }
 
+    final dateTimeLabel = DateFormat('dd/MM/yyyy HH:mm');
+
     return Scaffold(
       appBar: AppBar(title: const Text('Heartbeat Device Log Viewer')),
       body: Stack(
@@ -270,7 +471,7 @@ class _LogPageState extends State<LogPage> {
                     ElevatedButton.icon(
                       onPressed: _isLoading ? null : _pickAndLoadFile,
                       icon: const Icon(Icons.upload_file),
-                      label: const Text('Chọn file JSON'),
+                      label: const Text('Chọn file JSON từ máy'),
                     ),
                     if (_loadedFileName != null)
                       Text(
@@ -288,12 +489,61 @@ class _LogPageState extends State<LogPage> {
                     border: OutlineInputBorder(),
                   ),
                 ),
+
+                const SizedBox(height: 8),
+
+                // Row chọn khoảng thời gian gen_time (Date + Time)
+                Row(
+                  children: [
+                    Expanded(
+                      child: OutlinedButton.icon(
+                        onPressed: _isLoading ? null : _pickFromGenDateTime,
+                        icon: const Icon(Icons.calendar_today),
+                        label: Text(
+                          _fromGenDateTime == null
+                              ? 'From gen_time'
+                              : 'From: ${dateTimeLabel.format(_fromGenDateTime!)}',
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: OutlinedButton.icon(
+                        onPressed: _isLoading ? null : _pickToGenDateTime,
+                        icon: const Icon(Icons.calendar_today_outlined),
+                        label: Text(
+                          _toGenDateTime == null
+                              ? 'To gen_time'
+                              : 'To: ${dateTimeLabel.format(_toGenDateTime!)}',
+                        ),
+                      ),
+                    ),
+                    IconButton(
+                      tooltip: 'Xoá filter thời gian',
+                      onPressed:
+                          (_fromGenDateTime == null &&
+                                  _toGenDateTime == null) ||
+                              _isLoading
+                          ? null
+                          : () {
+                              setState(() {
+                                _fromGenDateTime = null;
+                                _toGenDateTime = null;
+                                _currentPage = 0;
+                              });
+                            },
+                      icon: const Icon(Icons.clear),
+                    ),
+                  ],
+                ),
+
                 const SizedBox(height: 12),
+
                 if (_error != null)
                   Text(_error!, style: const TextStyle(color: Colors.red)),
                 const SizedBox(height: 8),
 
-                // Table + pagination
+                // Table + pagination (Expanded)
                 Expanded(
                   child: _buildPagedTable(
                     pageLogs: pageLogs,
@@ -321,34 +571,7 @@ class _LogPageState extends State<LogPage> {
     );
   }
 
-  Future<void> _changePage(int newPage) async {
-    await _setLoadingForShortAction(() async {
-      setState(() {
-        _currentPage = newPage;
-      });
-      await Future.delayed(const Duration(milliseconds: 150));
-    });
-  }
-
-  Future<void> _changeRowsPerPage(int newSize) async {
-    await _setLoadingForShortAction(() async {
-      setState(() {
-        _rowsPerPage = newSize;
-        _currentPage = 0;
-      });
-      await Future.delayed(const Duration(milliseconds: 150));
-    });
-  }
-
-  Future<void> _toggleSort() async {
-    await _setLoadingForShortAction(() async {
-      setState(() {
-        _sortAscending = !_sortAscending;
-        _currentPage = 0;
-      });
-      await Future.delayed(const Duration(milliseconds: 150));
-    });
-  }
+  // ========== Table custom: header cố định, row wrap, rộng dùng Expanded ==========
 
   Widget _buildPagedTable({
     required List<HeartbeatLogEntry> pageLogs,
@@ -383,7 +606,7 @@ class _LogPageState extends State<LogPage> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  // ---- HEADER ----
+                  // ---- HEADER (CỐ ĐỊNH) ----
                   Container(
                     color: theme.colorScheme.primary.withOpacity(0.08),
                     padding: const EdgeInsets.symmetric(
@@ -398,17 +621,6 @@ class _LogPageState extends State<LogPage> {
                           flex: 1,
                           child: Text(
                             'ID',
-                            style: theme.textTheme.labelLarge?.copyWith(
-                              fontWeight: FontWeight.bold,
-                            ),
-                          ),
-                        ),
-
-                        // created_at
-                        Expanded(
-                          flex: 2,
-                          child: Text(
-                            'created_at',
                             style: theme.textTheme.labelLarge?.copyWith(
                               fontWeight: FontWeight.bold,
                             ),
@@ -439,9 +651,19 @@ class _LogPageState extends State<LogPage> {
                             ),
                           ),
                         ),
+                        // created_at
+                        Expanded(
+                          flex: 2,
+                          child: Text(
+                            'created_at',
+                            style: theme.textTheme.labelLarge?.copyWith(
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ),
                         // message
                         Expanded(
-                          flex: 12,
+                          flex: 7,
                           child: Text(
                             'message',
                             style: theme.textTheme.labelLarge?.copyWith(
@@ -454,7 +676,7 @@ class _LogPageState extends State<LogPage> {
                   ),
                   const Divider(height: 1),
 
-                  // ---- ROWS ----
+                  // ---- ROWS (SCROLL DỌC) ----
                   Expanded(
                     child: Scrollbar(
                       thumbVisibility: true,
@@ -491,20 +713,19 @@ class _LogPageState extends State<LogPage> {
                                 Expanded(
                                   flex: 2,
                                   child: SelectableText(
-                                    log.createdAt,
+                                    log.genTimeFormatted,
                                     style: cellStyle,
                                   ),
                                 ),
                                 Expanded(
                                   flex: 2,
                                   child: SelectableText(
-                                    log.genTimeFormatted,
+                                    log.createdAt,
                                     style: cellStyle,
                                   ),
                                 ),
-
                                 Expanded(
-                                  flex: 12,
+                                  flex: 7,
                                   child: _buildHighlightedMessage(
                                     log.message,
                                     cellStyle,
