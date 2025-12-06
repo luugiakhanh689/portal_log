@@ -7,35 +7,10 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
+import 'package:portal_log/heartbeat_log_entry.dart';
 
 void main() {
   runApp(const MyApp());
-}
-
-// ================== MODEL ==================
-
-class HeartbeatLogEntry {
-  final String createdAt; // cột timestamp trong CSV
-  final int typeData; // trong payload logs (chưa dùng nhưng giữ lại)
-  final String message; // trong payload logs
-  final int genTime; // seconds
-
-  HeartbeatLogEntry({
-    required this.createdAt,
-    required this.typeData,
-    required this.message,
-    required this.genTime,
-  });
-
-  DateTime get genTimeDateTime => DateTime.fromMillisecondsSinceEpoch(
-    genTime * 1000,
-    isUtc: true,
-  ).toLocal();
-
-  String get genTimeFormatted {
-    final dt = genTimeDateTime;
-    return DateFormat('yyyy-MM-dd HH:mm:ss').format(dt);
-  }
 }
 
 // ================== PARSER ISOLATE ==================
