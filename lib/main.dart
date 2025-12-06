@@ -7,7 +7,10 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
+import 'package:pdf/pdf.dart';
+import 'package:pdf/widgets.dart' as pw;
 import 'package:portal_log/heartbeat_log_entry.dart';
+import 'package:printing/printing.dart';
 
 void main() {
   runApp(const MyApp());
@@ -313,6 +316,122 @@ class _LogPageState extends State<LogPage> {
     }
   }
 
+  // ================== EXPORT PDF (filtered logs) ==================
+
+  Future<void> _exportFilteredToPdf() async {
+    if (_filteredLogs.isEmpty) {
+      setState(() {
+        _error = 'Không có dữ liệu để export PDF.';
+      });
+      return;
+    }
+
+    // Font Unicode – giữ được ký tự →, tiếng Việt,...
+    final baseFont = await PdfGoogleFonts.notoSansRegular();
+    final boldFont = await PdfGoogleFonts.notoSansBold();
+
+    final doc = pw.Document();
+
+    final now = DateTime.now();
+    final title = 'Heartbeat Device Logs';
+    final subtitle =
+        'Export at ${DateFormat('yyyy-MM-dd HH:mm:ss').format(now)}';
+    final total = _filteredLogs.length;
+
+    // Chuẩn bị headers và data cho TableHelper
+    final headers = ['created_at', 'gen_time', 'message'];
+    final data = _filteredLogs.map((log) {
+      return [log.createdAt, log.genTimeFormatted, log.message];
+    }).toList();
+
+    doc.addPage(
+      pw.MultiPage(
+        pageFormat: PdfPageFormat.a4,
+        margin: const pw.EdgeInsets.all(24),
+
+        // Dùng font Unicode
+        theme: pw.ThemeData.withFont(base: baseFont, bold: boldFont),
+
+        // Header lặp lại mỗi trang
+        header: (context) {
+          return pw.Column(
+            crossAxisAlignment: pw.CrossAxisAlignment.start,
+            children: [
+              pw.Text(
+                title,
+                style: pw.TextStyle(
+                  fontSize: 16,
+                  fontWeight: pw.FontWeight.bold,
+                ),
+              ),
+              pw.SizedBox(height: 2),
+              pw.Text(
+                subtitle,
+                style: const pw.TextStyle(
+                  fontSize: 9,
+                  color: PdfColors.grey700,
+                ),
+              ),
+              pw.SizedBox(height: 2),
+              pw.Text(
+                'Total: $total record(s)',
+                style: const pw.TextStyle(
+                  fontSize: 9,
+                  color: PdfColors.grey700,
+                ),
+              ),
+              pw.SizedBox(height: 8),
+              pw.Divider(thickness: 0.5),
+              pw.SizedBox(height: 4),
+            ],
+          );
+        },
+
+        footer: (context) {
+          return pw.Container(
+            alignment: pw.Alignment.centerRight,
+            margin: const pw.EdgeInsets.only(top: 8),
+            child: pw.Text(
+              'Page ${context.pageNumber} / ${context.pagesCount}',
+              style: const pw.TextStyle(fontSize: 9, color: PdfColors.grey600),
+            ),
+          );
+        },
+
+        build: (context) {
+          return [
+            pw.TableHelper.fromTextArray(
+              headers: headers,
+              data: data,
+              headerStyle: pw.TextStyle(
+                fontWeight: pw.FontWeight.bold,
+                fontSize: 9,
+              ),
+              cellStyle: const pw.TextStyle(fontSize: 8),
+              headerDecoration: const pw.BoxDecoration(
+                color: PdfColors.grey300,
+              ),
+              headerAlignment: pw.Alignment.centerLeft,
+              cellAlignment: pw.Alignment.topLeft,
+              cellPadding: const pw.EdgeInsets.symmetric(
+                horizontal: 3,
+                vertical: 2,
+              ),
+              // message rộng hơn
+              columnWidths: const {
+                0: pw.FlexColumnWidth(2), // created_at
+                1: pw.FlexColumnWidth(2), // gen_time
+                2: pw.FlexColumnWidth(6), // message
+              },
+            ),
+          ];
+        },
+      ),
+    );
+
+    await Printing.layoutPdf(onLayout: (format) async => doc.save());
+  }
+
   // ================== FILTER + SORT ==================
 
   void _rebuildFilteredLogs() {
@@ -528,6 +647,18 @@ class _LogPageState extends State<LogPage> {
                           : _pickAndLoadFile,
                       icon: const Icon(Icons.upload_file),
                       label: const Text('Chọn file CSV'),
+                    ),
+                    const SizedBox(width: 8),
+                    // Export PDF button
+                    FilledButton.tonalIcon(
+                      onPressed:
+                          (_isFileLoading ||
+                              _isTableLoading ||
+                              _filteredLogs.isEmpty)
+                          ? null
+                          : _exportFilteredToPdf,
+                      icon: const Icon(Icons.picture_as_pdf),
+                      label: const Text('Export PDF'),
                     ),
                     const SizedBox(width: 12),
                     if (_loadedFileName != null)
@@ -915,7 +1046,6 @@ class _LogPageState extends State<LogPage> {
                   value: _rowsPerPage,
                   borderRadius: BorderRadius.circular(16),
                   focusColor: scheme.primaryContainer,
-
                   items: _pageSizeOptions
                       .map(
                         (v) =>
