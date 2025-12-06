@@ -1,8 +1,11 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
 
-import 'package:flutter/material.dart';
+import 'package:csv/csv.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 
 void main() {
@@ -12,40 +15,124 @@ void main() {
 // ================== MODEL ==================
 
 class HeartbeatLogEntry {
-  final int id;
-  final String createdAt;
-  final String userId;
-  final String message;
-  final int genTime; // timestamp (seconds)
+  final String createdAt; // cột timestamp trong CSV
+  final int typeData; // trong payload logs (chưa dùng nhưng giữ lại)
+  final String message; // trong payload logs
+  final int genTime; // seconds
 
   HeartbeatLogEntry({
-    required this.id,
     required this.createdAt,
-    required this.userId,
+    required this.typeData,
     required this.message,
     required this.genTime,
   });
 
-  // Convert gen_time (seconds) -> DateTime
   DateTime get genTimeDateTime => DateTime.fromMillisecondsSinceEpoch(
     genTime * 1000,
     isUtc: true,
   ).toLocal();
 
-  // Convert gen_time -> string datetime
   String get genTimeFormatted {
     final dt = genTimeDateTime;
     return DateFormat('yyyy-MM-dd HH:mm:ss').format(dt);
   }
+}
 
-  factory HeartbeatLogEntry.fromJson(Map<String, dynamic> json) {
-    return HeartbeatLogEntry(
-      id: int.parse(json['id'] as String),
-      createdAt: json['created_at'] as String,
-      userId: json['user_id'] as String,
-      message: json['message'] as String,
-      genTime: int.parse(json['gen_time'] as String),
+// ================== PARSER ISOLATE ==================
+/// Hàm chạy trong Isolate để parse CSV.
+/// Input: toàn bộ nội dung CSV (String)
+/// Output:
+/// {
+///   "error": String? (nếu có),
+///   "logs": [
+///      {"createdAt": ..., "typeData": ..., "message": ..., "genTime": ...},
+///      ...
+///   ]
+/// }
+Map<String, dynamic> parseCsvInIsolate(String content) {
+  final converter = const CsvToListConverter(
+    eol: '\n',
+    shouldParseNumbers: false,
+  );
+
+  try {
+    final rows = converter.convert(content);
+
+    if (rows.isEmpty) {
+      return {'error': 'File CSV rỗng.', 'logs': <Map<String, dynamic>>[]};
+    }
+
+    final header = rows.first.map((e) => e.toString().trim()).toList();
+
+    int timestampIndex = header.indexWhere(
+      (h) => h.toLowerCase() == '@timestamp' || h.toLowerCase() == 'timestamp',
     );
+    int requestBodyIndex = header.indexWhere(
+      (h) => h.toLowerCase() == 'request_body',
+    );
+
+    if (timestampIndex == -1 || requestBodyIndex == -1) {
+      return {
+        'error':
+            'Không tìm thấy cột "timestamp/@timestamp" hoặc "request_body" trong header CSV.',
+        'logs': <Map<String, dynamic>>[],
+      };
+    }
+
+    final logs = <Map<String, dynamic>>[];
+
+    for (int i = 1; i < rows.length; i++) {
+      final row = rows[i];
+
+      if (row.length <= math.max(timestampIndex, requestBodyIndex)) {
+        continue;
+      }
+
+      final timestampRaw = row[timestampIndex]?.toString() ?? '';
+      final requestBodyRaw = row[requestBodyIndex]?.toString() ?? '';
+
+      if (requestBodyRaw.isEmpty) continue;
+
+      try {
+        // chuẩn hoá double-quote
+        final normalizedJson = requestBodyRaw.replaceAll('""', '"');
+        final decoded = jsonDecode(normalizedJson);
+
+        if (decoded is! Map<String, dynamic>) continue;
+        final logsList = decoded['logs'];
+        if (logsList is! List) continue;
+
+        for (final item in logsList) {
+          if (item is! Map<String, dynamic>) continue;
+
+          final genTimeRaw = item['genTime'];
+          final messageRaw = item['message'];
+          final typeDataRaw = item['typeData'];
+
+          if (genTimeRaw == null || messageRaw == null) continue;
+
+          final genTime = int.tryParse(genTimeRaw.toString());
+          if (genTime == null) continue;
+
+          final typeData = int.tryParse(typeDataRaw?.toString() ?? '0') ?? 0;
+          final message = messageRaw.toString();
+
+          logs.add({
+            'createdAt': timestampRaw,
+            'typeData': typeData,
+            'message': message,
+            'genTime': genTime,
+          });
+        }
+      } catch (_) {
+        // ignore 1 row lỗi
+        continue;
+      }
+    }
+
+    return {'error': null, 'logs': logs};
+  } catch (e) {
+    return {'error': 'Lỗi parse CSV: $e', 'logs': <Map<String, dynamic>>[]};
   }
 }
 
@@ -56,16 +143,40 @@ class MyApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // Coffee-ish color scheme
+    const seed = Color(0xFF6F4E37); // coffee brown
+    final colorScheme = ColorScheme.fromSeed(
+      seedColor: seed,
+      brightness: Brightness.light,
+    );
+
     return MaterialApp(
       title: 'Heartbeat Device Log Viewer',
+      debugShowCheckedModeBanner: false,
       theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.blue),
         useMaterial3: true,
+        colorScheme: colorScheme,
+        scaffoldBackgroundColor: colorScheme.surfaceContainerHighest.withAlpha(
+          40,
+        ),
+        appBarTheme: AppBarTheme(
+          backgroundColor: colorScheme.primaryContainer,
+          foregroundColor: colorScheme.onPrimaryContainer,
+          elevation: 4,
+          shadowColor: Colors.black26,
+          centerTitle: true,
+          surfaceTintColor: Colors.transparent,
+          shape: const RoundedRectangleBorder(
+            borderRadius: BorderRadius.vertical(bottom: Radius.circular(20)),
+          ),
+        ),
       ),
       home: const LogPage(),
     );
   }
 }
+
+// ================== PAGE ==================
 
 class LogPage extends StatefulWidget {
   const LogPage({super.key});
@@ -75,7 +186,12 @@ class LogPage extends StatefulWidget {
 }
 
 class _LogPageState extends State<LogPage> {
-  List<HeartbeatLogEntry> _logs = [];
+  // toàn bộ logs sau khi parse CSV
+  List<HeartbeatLogEntry> _allLogs = [];
+
+  // logs sau filter + sort
+  List<HeartbeatLogEntry> _filteredLogs = [];
+
   String _searchText = '';
   final TextEditingController _searchController = TextEditingController();
   String? _error;
@@ -83,71 +199,93 @@ class _LogPageState extends State<LogPage> {
 
   bool _sortAscending = true; // sort theo genTime
 
-  // Pagination
+  // pagination
   int _rowsPerPage = 50;
   int _currentPage = 0; // 0-based
   final List<int> _pageSizeOptions = [20, 50, 100, 200];
 
-  // Loading state
-  bool _isLoading = false;
+  // loading state
+  bool _isFileLoading = false; // khi import CSV
+  bool _isTableLoading = false; // khi filter/sort/paging/search
 
-  // GenTime datetime range filter
+  // filter theo gen_time
   DateTime? _fromGenDateTime;
   DateTime? _toGenDateTime;
+
+  // debounce search
+  Timer? _searchDebounce;
+
+  // controller cho Scrollbar + ListView
+  final ScrollController _tableScrollController = ScrollController();
 
   @override
   void initState() {
     super.initState();
-    _searchController.addListener(() {
-      setState(() {
-        _searchText = _searchController.text;
-        _currentPage = 0; // reset page khi search
-      });
-    });
+    _searchController.addListener(_onSearchChanged);
   }
 
   @override
   void dispose() {
+    _searchController.removeListener(_onSearchChanged);
     _searchController.dispose();
+    _searchDebounce?.cancel();
+    _tableScrollController.dispose();
     super.dispose();
   }
 
-  Future<void> _setLoadingForShortAction(Future<void> Function() action) async {
+  // ================== SEARCH ==================
+
+  void _onSearchChanged() {
+    _searchDebounce?.cancel();
+    final text = _searchController.text;
+
     setState(() {
-      _isLoading = true;
+      _searchText = text;
+      _isTableLoading = true;
+    });
+
+    _searchDebounce = Timer(const Duration(milliseconds: 250), () {
+      if (!mounted) return;
+      _rebuildFilteredLogs();
+    });
+  }
+
+  Future<void> _withTableLoading(Future<void> Function() action) async {
+    setState(() {
+      _isTableLoading = true;
     });
     try {
       await action();
     } finally {
       if (!mounted) return;
       setState(() {
-        _isLoading = false;
+        _isTableLoading = false;
       });
     }
   }
 
-  // ========== Import JSON từ local (bytes) ==========
+  // ================== IMPORT CSV (compute) ==================
 
   Future<void> _pickAndLoadFile() async {
     setState(() {
       _error = null;
       _loadedFileName = null;
-      _logs = [];
+      _allLogs = [];
+      _filteredLogs = [];
       _currentPage = 0;
-      _isLoading = true;
       _fromGenDateTime = null;
       _toGenDateTime = null;
+      _isFileLoading = true;
     });
 
     try {
       final result = await FilePicker.platform.pickFiles(
         type: FileType.custom,
-        allowedExtensions: ['json'],
-        withData: true, // Web/desktop: dùng bytes
+        allowedExtensions: ['csv'],
+        withData: true,
       );
 
       if (result == null || result.files.isEmpty) {
-        // user cancel
         return;
       }
 
@@ -161,57 +299,33 @@ class _LogPageState extends State<LogPage> {
       }
 
       final content = utf8.decode(bytes);
-      final decoded = jsonDecode(content);
 
-      if (decoded is! List) {
-        setState(() {
-          _error = 'Format JSON không đúng (không phải List).';
-        });
-        return;
-      }
+      // Parse CSV ở Isolate
+      final parsed = await compute(parseCsvInIsolate, content);
 
-      // Tìm object {type: "table", name: "heartbeat_device_log", data: [...]}
-      Map<String, dynamic>? tableObj;
-      for (final e in decoded) {
-        if (e is Map<String, dynamic> &&
-            e['type'] == 'table' &&
-            e['name'] == 'heartbeat_device_log') {
-          tableObj = e;
-          break;
-        }
-      }
+      final String? error = parsed['error'] as String?;
+      final List<dynamic> rawLogsDynamic = parsed['logs'] as List<dynamic>;
 
-      if (tableObj == null || tableObj['data'] == null) {
-        setState(() {
-          _error = 'Không tìm thấy bảng heartbeat_device_log trong file.';
-        });
-        return;
-      }
-
-      final rawData = tableObj['data'];
-      if (rawData is! List) {
-        setState(() {
-          _error = 'Trường data trong JSON không phải List.';
-        });
-        return;
-      }
-
-      final logs = <HeartbeatLogEntry>[];
-      for (final item in rawData) {
-        if (item is Map<String, dynamic>) {
-          try {
-            logs.add(HeartbeatLogEntry.fromJson(item));
-          } catch (_) {
-            // bỏ qua record lỗi
-          }
-        }
-      }
+      final logs = rawLogsDynamic
+          .cast<Map<String, dynamic>>()
+          .map(
+            (m) => HeartbeatLogEntry(
+              createdAt: m['createdAt'] as String,
+              typeData: m['typeData'] as int,
+              message: m['message'] as String,
+              genTime: m['genTime'] as int,
+            ),
+          )
+          .toList();
 
       setState(() {
-        _logs = logs;
+        _error = error;
+        _allLogs = logs;
         _loadedFileName = file.name;
         _currentPage = 0;
       });
+
+      _rebuildFilteredLogs();
     } catch (e) {
       setState(() {
         _error = 'Lỗi khi đọc file: $e';
@@ -219,64 +333,61 @@ class _LogPageState extends State<LogPage> {
     } finally {
       if (!mounted) return;
       setState(() {
-        _isLoading = false;
+        _isFileLoading = false;
       });
     }
   }
 
-  // ========== Highlight search trong message ==========
-  // Giữ nguyên font & size, chỉ tô nền vàng phần match, và text copy được
+  // ================== FILTER + SORT ==================
 
-  Widget _buildHighlightedMessage(String message, TextStyle? cellStyle) {
-    final baseStyle = cellStyle ?? DefaultTextStyle.of(context).style;
+  void _rebuildFilteredLogs() {
+    final fromEpoch = _fromGenDateTime == null
+        ? null
+        : _fromGenDateTime!.toUtc().millisecondsSinceEpoch ~/ 1000;
+    final toEpoch = _toGenDateTime == null
+        ? null
+        : _toGenDateTime!.toUtc().millisecondsSinceEpoch ~/ 1000;
 
-    if (_searchText.isEmpty) {
-      return SelectableText(message, style: baseStyle);
-    }
+    final searchLower = _searchText.toLowerCase();
 
-    final lowerMessage = message.toLowerCase();
-    final lowerQuery = _searchText.toLowerCase();
-
-    final spans = <TextSpan>[];
-    int start = 0;
-
-    while (true) {
-      final index = lowerMessage.indexOf(lowerQuery, start);
-      if (index < 0) {
-        if (start < message.length) {
-          spans.add(TextSpan(text: message.substring(start)));
-        }
-        break;
+    List<HeartbeatLogEntry> tmp = _allLogs.where((log) {
+      if (searchLower.isNotEmpty &&
+          !log.message.toLowerCase().contains(searchLower)) {
+        return false;
       }
 
-      if (index > start) {
-        spans.add(TextSpan(text: message.substring(start, index)));
-      }
+      if (fromEpoch != null && log.genTime < fromEpoch) return false;
+      if (toEpoch != null && log.genTime > toEpoch) return false;
 
-      spans.add(
-        TextSpan(
-          text: message.substring(index, index + _searchText.length),
-          style: baseStyle.copyWith(backgroundColor: Colors.yellow),
-        ),
-      );
+      return true;
+    }).toList();
 
-      start = index + _searchText.length;
+    tmp.sort((a, b) {
+      final cmp = a.genTime.compareTo(b.genTime);
+      return _sortAscending ? cmp : -cmp;
+    });
+
+    setState(() {
+      _filteredLogs = tmp;
+      _currentPage = 0;
+      _isTableLoading = false;
+    });
+
+    if (_tableScrollController.hasClients) {
+      _tableScrollController.jumpTo(0);
     }
-
-    return SelectableText.rich(TextSpan(style: baseStyle, children: spans));
   }
 
-  // ========== DateTime range picker cho gen_time (ngày + giờ + phút) ==========
+  // ================== DATE RANGE PICKER ==================
 
   Future<void> _pickFromGenDateTime() async {
-    if (_isLoading) return;
+    if (_isFileLoading || _isTableLoading) return;
 
     final now = DateTime.now();
     final initial =
         _fromGenDateTime ??
-        (_logs.isNotEmpty ? _logs.first.genTimeDateTime : now);
+        (_allLogs.isNotEmpty ? _allLogs.first.genTimeDateTime : now);
 
-    // Bước 1: chọn ngày
     final pickedDate = await showDatePicker(
       context: context,
       initialDate: initial,
@@ -285,7 +396,6 @@ class _LogPageState extends State<LogPage> {
     );
     if (pickedDate == null) return;
 
-    // Bước 2: chọn giờ/phút (24 giờ format)
     final pickedTime = await showTimePicker(
       context: context,
       initialTime: TimeOfDay.fromDateTime(initial),
@@ -301,24 +411,23 @@ class _LogPageState extends State<LogPage> {
         pickedTime.minute,
       );
     } else {
-      // nếu cancel time → mặc định 00:00
       result = DateTime(pickedDate.year, pickedDate.month, pickedDate.day);
     }
 
-    setState(() {
+    await _withTableLoading(() async {
       _fromGenDateTime = result;
-      _currentPage = 0;
+      _rebuildFilteredLogs();
     });
   }
 
   Future<void> _pickToGenDateTime() async {
-    if (_isLoading) return;
+    if (_isFileLoading || _isTableLoading) return;
 
     final now = DateTime.now();
     final initial =
-        _toGenDateTime ?? (_logs.isNotEmpty ? _logs.last.genTimeDateTime : now);
+        _toGenDateTime ??
+        (_allLogs.isNotEmpty ? _allLogs.last.genTimeDateTime : now);
 
-    // Bước 1: chọn ngày
     final pickedDate = await showDatePicker(
       context: context,
       initialDate: initial,
@@ -327,7 +436,6 @@ class _LogPageState extends State<LogPage> {
     );
     if (pickedDate == null) return;
 
-    // Bước 2: chọn giờ/phút (24 giờ format)
     final pickedTime = await showTimePicker(
       context: context,
       initialTime: TimeOfDay.fromDateTime(initial),
@@ -343,7 +451,6 @@ class _LogPageState extends State<LogPage> {
         pickedTime.minute,
       );
     } else {
-      // nếu cancel time → mặc định 23:59
       result = DateTime(
         pickedDate.year,
         pickedDate.month,
@@ -353,89 +460,51 @@ class _LogPageState extends State<LogPage> {
       );
     }
 
-    setState(() {
+    await _withTableLoading(() async {
       _toGenDateTime = result;
-      _currentPage = 0;
+      _rebuildFilteredLogs();
     });
   }
 
-  // Helpers cho các action có loading ngắn (chuyển trang, đổi size, đổi sort)
+  // ================== PAGING + SORT ==================
 
   Future<void> _changePage(int newPage) async {
-    await _setLoadingForShortAction(() async {
+    await _withTableLoading(() async {
       setState(() {
         _currentPage = newPage;
       });
-      await Future.delayed(const Duration(milliseconds: 150));
+      if (_tableScrollController.hasClients) {
+        _tableScrollController.jumpTo(0);
+      }
+      await Future.delayed(const Duration(milliseconds: 80));
     });
   }
 
   Future<void> _changeRowsPerPage(int newSize) async {
-    await _setLoadingForShortAction(() async {
+    await _withTableLoading(() async {
       setState(() {
         _rowsPerPage = newSize;
         _currentPage = 0;
       });
-      await Future.delayed(const Duration(milliseconds: 150));
+      if (_tableScrollController.hasClients) {
+        _tableScrollController.jumpTo(0);
+      }
+      await Future.delayed(const Duration(milliseconds: 80));
     });
   }
 
   Future<void> _toggleSort() async {
-    await _setLoadingForShortAction(() async {
-      setState(() {
-        _sortAscending = !_sortAscending;
-        _currentPage = 0;
-      });
-      await Future.delayed(const Duration(milliseconds: 150));
+    await _withTableLoading(() async {
+      _sortAscending = !_sortAscending;
+      _rebuildFilteredLogs();
     });
   }
 
-  // ========== UI chính ==========
-
   @override
   Widget build(BuildContext context) {
-    // Chuẩn bị epoch giây cho from/to để so sánh trực tiếp với gen_time
-    int? fromEpoch;
-    int? toEpoch;
-    if (_fromGenDateTime != null) {
-      fromEpoch = _fromGenDateTime!.toUtc().millisecondsSinceEpoch ~/ 1000;
-    }
-    if (_toGenDateTime != null) {
-      toEpoch = _toGenDateTime!.toUtc().millisecondsSinceEpoch ~/ 1000;
-    }
-
-    // Filter: message + khoảng gen_time (epoch giây)
-    final filteredLogs = _logs.where((log) {
-      // filter theo message
-      if (_searchText.isNotEmpty &&
-          !log.message.toLowerCase().contains(_searchText.toLowerCase())) {
-        return false;
-      }
-
-      // filter theo khoảng gen_time (so sánh giây)
-      if (fromEpoch != null && log.genTime < fromEpoch) {
-        return false;
-      }
-      if (toEpoch != null && log.genTime > toEpoch) {
-        return false;
-      }
-
-      return true;
-    }).toList();
-
-    // Sort theo genTime
-    filteredLogs.sort((a, b) {
-      final cmp = a.genTime.compareTo(b.genTime);
-      return _sortAscending ? cmp : -cmp;
-    });
-
-    final total = filteredLogs.length;
-
-    // Paging
+    final total = _filteredLogs.length;
     final pageCount = total == 0 ? 1 : (total / _rowsPerPage).ceil();
-    final currentPage = total == 0
-        ? 0
-        : _currentPage.clamp(0, pageCount - 1); // tránh out-of-range
+    final currentPage = total == 0 ? 0 : _currentPage.clamp(0, pageCount - 1);
 
     final int startIndex;
     final int endIndex;
@@ -448,10 +517,12 @@ class _LogPageState extends State<LogPage> {
     } else {
       startIndex = currentPage * _rowsPerPage;
       endIndex = math.min(startIndex + _rowsPerPage, total);
-      pageLogs = filteredLogs.sublist(startIndex, endIndex);
+      pageLogs = _filteredLogs.sublist(startIndex, endIndex);
     }
 
     final dateTimeLabel = DateFormat('dd/MM/yyyy HH:mm');
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
 
     return Scaffold(
       appBar: AppBar(title: const Text('Heartbeat Device Log Viewer')),
@@ -462,59 +533,143 @@ class _LogPageState extends State<LogPage> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                // Top controls
-                Wrap(
-                  spacing: 12,
-                  runSpacing: 8,
-                  crossAxisAlignment: WrapCrossAlignment.center,
+                // top controls
+                Row(
                   children: [
-                    ElevatedButton.icon(
-                      onPressed: _isLoading ? null : _pickAndLoadFile,
+                    FilledButton.icon(
+                      style: FilledButton.styleFrom(
+                        backgroundColor: scheme.primary,
+                        foregroundColor: scheme.onPrimary,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(999),
+                        ),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 20,
+                          vertical: 10,
+                        ),
+                      ),
+                      onPressed: _isFileLoading || _isTableLoading
+                          ? null
+                          : _pickAndLoadFile,
                       icon: const Icon(Icons.upload_file),
-                      label: const Text('Chọn file JSON từ máy'),
+                      label: const Text('Chọn file CSV'),
                     ),
+                    const SizedBox(width: 12),
                     if (_loadedFileName != null)
-                      Text(
-                        'Đã load: $_loadedFileName (${_logs.length} dòng)',
-                        style: const TextStyle(fontStyle: FontStyle.italic),
+                      Expanded(
+                        child: Align(
+                          alignment: Alignment.centerLeft,
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 12,
+                              vertical: 8,
+                            ),
+                            decoration: BoxDecoration(
+                              color: scheme.surface,
+                              borderRadius: BorderRadius.circular(999),
+                              boxShadow: [
+                                BoxShadow(
+                                  color: Colors.black.withOpacity(0.05),
+                                  blurRadius: 6,
+                                  offset: const Offset(0, 2),
+                                ),
+                              ],
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(
+                                  Icons.coffee,
+                                  size: 18,
+                                  color: scheme.primary,
+                                ),
+                                const SizedBox(width: 8),
+                                Flexible(
+                                  child: Text(
+                                    '$_loadedFileName • ${_allLogs.length} log(s)',
+                                    overflow: TextOverflow.ellipsis,
+                                    style: TextStyle(
+                                      fontStyle: FontStyle.italic,
+                                      color: scheme.onSurface,
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
                       ),
                   ],
                 ),
+
                 const SizedBox(height: 12),
+
+                // search
                 TextField(
                   controller: _searchController,
-                  decoration: const InputDecoration(
+                  enabled: !_isFileLoading,
+                  decoration: InputDecoration(
                     labelText: 'Search theo message',
-                    prefixIcon: Icon(Icons.search),
-                    border: OutlineInputBorder(),
+                    prefixIcon: const Icon(Icons.search),
+                    filled: true,
+                    fillColor: scheme.surface,
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(24),
+                    ),
+                    enabledBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(24),
+                      borderSide: BorderSide(color: scheme.outlineVariant),
+                    ),
+                    suffixIcon: _searchText.isNotEmpty
+                        ? IconButton(
+                            icon: const Icon(Icons.clear),
+                            onPressed: () {
+                              _searchController.clear();
+                            },
+                          )
+                        : null,
                   ),
                 ),
 
                 const SizedBox(height: 8),
 
-                // Row chọn khoảng thời gian gen_time (Date + Time)
+                // date range
                 Row(
                   children: [
                     Expanded(
                       child: OutlinedButton.icon(
-                        onPressed: _isLoading ? null : _pickFromGenDateTime,
+                        onPressed: _isFileLoading ? null : _pickFromGenDateTime,
                         icon: const Icon(Icons.calendar_today),
                         label: Text(
                           _fromGenDateTime == null
                               ? 'From gen_time'
                               : 'From: ${dateTimeLabel.format(_fromGenDateTime!)}',
                         ),
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor: scheme.primary,
+                          side: BorderSide(color: scheme.outlineVariant),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(999),
+                          ),
+                        ),
                       ),
                     ),
                     const SizedBox(width: 8),
                     Expanded(
                       child: OutlinedButton.icon(
-                        onPressed: _isLoading ? null : _pickToGenDateTime,
+                        onPressed: _isFileLoading ? null : _pickToGenDateTime,
                         icon: const Icon(Icons.calendar_today_outlined),
                         label: Text(
                           _toGenDateTime == null
                               ? 'To gen_time'
                               : 'To: ${dateTimeLabel.format(_toGenDateTime!)}',
+                        ),
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor: scheme.primary,
+                          side: BorderSide(color: scheme.outlineVariant),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(999),
+                          ),
                         ),
                       ),
                     ),
@@ -523,13 +678,13 @@ class _LogPageState extends State<LogPage> {
                       onPressed:
                           (_fromGenDateTime == null &&
                                   _toGenDateTime == null) ||
-                              _isLoading
+                              _isFileLoading
                           ? null
                           : () {
-                              setState(() {
+                              _withTableLoading(() async {
                                 _fromGenDateTime = null;
                                 _toGenDateTime = null;
-                                _currentPage = 0;
+                                _rebuildFilteredLogs();
                               });
                             },
                       icon: const Icon(Icons.clear),
@@ -537,15 +692,26 @@ class _LogPageState extends State<LogPage> {
                   ],
                 ),
 
-                const SizedBox(height: 12),
+                const SizedBox(height: 8),
+
+                // loading bar cho table
+                AnimatedSwitcher(
+                  duration: const Duration(milliseconds: 200),
+                  child: _isTableLoading
+                      ? const LinearProgressIndicator(key: ValueKey('loading'))
+                      : const SizedBox(key: ValueKey('no_loading'), height: 4),
+                ),
+
+                const SizedBox(height: 8),
 
                 if (_error != null)
                   Text(_error!, style: const TextStyle(color: Colors.red)),
                 const SizedBox(height: 8),
 
-                // Table + pagination (Expanded)
+                // table
                 Expanded(
                   child: _buildPagedTable(
+                    theme: theme,
                     pageLogs: pageLogs,
                     total: total,
                     pageCount: pageCount,
@@ -558,12 +724,33 @@ class _LogPageState extends State<LogPage> {
             ),
           ),
 
-          // Loading overlay
-          if (_isLoading)
+          // overlay khi đang import file
+          if (_isFileLoading)
             Positioned.fill(
               child: Container(
-                color: Colors.black.withOpacity(0.08),
-                child: const Center(child: CircularProgressIndicator()),
+                color: Colors.black.withAlpha(8),
+                child: Center(
+                  child: Card(
+                    elevation: 8,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(20),
+                    ),
+                    child: const Padding(
+                      padding: EdgeInsets.symmetric(
+                        horizontal: 24,
+                        vertical: 18,
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          CircularProgressIndicator(),
+                          SizedBox(width: 16),
+                          Text('Đang tải CSV...'),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
               ),
             ),
         ],
@@ -571,9 +758,10 @@ class _LogPageState extends State<LogPage> {
     );
   }
 
-  // ========== Table custom: header cố định, row wrap, rộng dùng Expanded ==========
+  // ================== TABLE: Header cố định + body scroll ==================
 
   Widget _buildPagedTable({
+    required ThemeData theme,
     required List<HeartbeatLogEntry> pageLogs,
     required int total,
     required int pageCount,
@@ -587,50 +775,53 @@ class _LogPageState extends State<LogPage> {
       );
     }
 
-    final theme = Theme.of(context);
-    final cellStyle =
-        theme.textTheme.bodyMedium; // style dùng chung cho các cell
+    final cellStyle = theme.textTheme.bodyMedium;
+    final scheme = theme.colorScheme;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        // ========== CARD TABLE ==========
         Expanded(
           child: Card(
-            elevation: 3,
+            color: scheme.surface,
+            elevation: 4,
             shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(12),
+              borderRadius: BorderRadius.circular(18),
             ),
             child: ClipRRect(
-              borderRadius: BorderRadius.circular(12),
+              borderRadius: BorderRadius.circular(18),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  // ---- HEADER (CỐ ĐỊNH) ----
+                  // ===== HEADER CỐ ĐỊNH TRONG CARD =====
                   Container(
-                    color: theme.colorScheme.primary.withOpacity(0.08),
+                    decoration: BoxDecoration(
+                      color: scheme.primary,
+                      border: Border(
+                        bottom: BorderSide(color: scheme.outlineVariant),
+                      ),
+                    ),
                     padding: const EdgeInsets.symmetric(
-                      horizontal: 12,
+                      horizontal: 16,
                       vertical: 10,
                     ),
                     child: Row(
                       crossAxisAlignment: CrossAxisAlignment.center,
                       children: [
-                        // ID
                         Expanded(
-                          flex: 1,
+                          flex: 2,
                           child: Text(
-                            'ID',
+                            'created_at',
                             style: theme.textTheme.labelLarge?.copyWith(
                               fontWeight: FontWeight.bold,
+                              color: scheme.onPrimary,
                             ),
                           ),
                         ),
-                        // gen_time (sortable)
                         Expanded(
                           flex: 2,
                           child: InkWell(
-                            onTap: _isLoading ? null : _toggleSort,
+                            onTap: _isFileLoading ? null : _toggleSort,
                             child: Row(
                               mainAxisSize: MainAxisSize.min,
                               children: [
@@ -638,6 +829,7 @@ class _LogPageState extends State<LogPage> {
                                   'gen_time',
                                   style: theme.textTheme.labelLarge?.copyWith(
                                     fontWeight: FontWeight.bold,
+                                    color: scheme.onPrimary,
                                   ),
                                 ),
                                 const SizedBox(width: 4),
@@ -646,95 +838,79 @@ class _LogPageState extends State<LogPage> {
                                       ? Icons.arrow_upward
                                       : Icons.arrow_downward,
                                   size: 16,
+                                  color: scheme.onPrimary,
                                 ),
                               ],
                             ),
                           ),
                         ),
-                        // created_at
                         Expanded(
-                          flex: 2,
-                          child: Text(
-                            'created_at',
-                            style: theme.textTheme.labelLarge?.copyWith(
-                              fontWeight: FontWeight.bold,
-                            ),
-                          ),
-                        ),
-                        // message
-                        Expanded(
-                          flex: 7,
+                          flex: 12,
                           child: Text(
                             'message',
                             style: theme.textTheme.labelLarge?.copyWith(
                               fontWeight: FontWeight.bold,
+                              color: scheme.onPrimary,
                             ),
                           ),
                         ),
                       ],
                     ),
                   ),
-                  const Divider(height: 1),
 
-                  // ---- ROWS (SCROLL DỌC) ----
+                  // ===== BODY SCROLL =====
                   Expanded(
-                    child: Scrollbar(
-                      thumbVisibility: true,
-                      child: ListView.builder(
-                        padding: EdgeInsets.zero,
-                        itemCount: pageLogs.length,
-                        itemBuilder: (context, index) {
-                          final log = pageLogs[index];
-                          final globalIndex = startIndex + index;
-                          final isEven = globalIndex.isEven;
+                    child: SelectionArea(
+                      child: Scrollbar(
+                        controller: _tableScrollController,
+                        thumbVisibility: true,
+                        child: ListView.builder(
+                          controller: _tableScrollController,
+                          itemCount: pageLogs.length,
+                          itemBuilder: (context, index) {
+                            final log = pageLogs[index];
+                            final globalIndex = startIndex + index;
+                            final isEven = globalIndex.isEven;
 
-                          final rowColor = isEven
-                              ? theme.colorScheme.surface
-                              : theme.colorScheme.surfaceVariant.withOpacity(
-                                  0.2,
-                                );
+                            final rowColor = isEven
+                                ? scheme.surface
+                                : scheme.primaryContainer.withAlpha(80);
 
-                          return Container(
-                            color: rowColor,
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 12,
-                              vertical: 8,
-                            ),
-                            child: Row(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Expanded(
-                                  flex: 1,
-                                  child: SelectableText(
-                                    log.id.toString(),
-                                    style: cellStyle,
+                            return Container(
+                              color: rowColor,
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 16,
+                                vertical: 8,
+                              ),
+                              child: Row(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  // created_at
+                                  Expanded(
+                                    flex: 2,
+                                    child: Text(
+                                      log.createdAt,
+                                      style: cellStyle,
+                                    ),
                                   ),
-                                ),
-                                Expanded(
-                                  flex: 2,
-                                  child: SelectableText(
-                                    log.genTimeFormatted,
-                                    style: cellStyle,
+                                  // gen_time
+                                  Expanded(
+                                    flex: 2,
+                                    child: Text(
+                                      log.genTimeFormatted,
+                                      style: cellStyle,
+                                    ),
                                   ),
-                                ),
-                                Expanded(
-                                  flex: 2,
-                                  child: SelectableText(
-                                    log.createdAt,
-                                    style: cellStyle,
+                                  // message – full text, SelectionArea
+                                  Expanded(
+                                    flex: 12,
+                                    child: Text(log.message, style: cellStyle),
                                   ),
-                                ),
-                                Expanded(
-                                  flex: 7,
-                                  child: _buildHighlightedMessage(
-                                    log.message,
-                                    cellStyle,
-                                  ),
-                                ),
-                              ],
-                            ),
-                          );
-                        },
+                                ],
+                              ),
+                            );
+                          },
+                        ),
                       ),
                     ),
                   ),
@@ -746,11 +922,10 @@ class _LogPageState extends State<LogPage> {
 
         const SizedBox(height: 8),
 
-        // ========== THANH PAGINATION + PAGE SIZE ==========
+        // ===== PAGINATION BAR =====
         Row(
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
-            // Info + dropdown chọn page size
             Row(
               children: [
                 Text(
@@ -763,13 +938,16 @@ class _LogPageState extends State<LogPage> {
                 const SizedBox(width: 4),
                 DropdownButton<int>(
                   value: _rowsPerPage,
+                  borderRadius: BorderRadius.circular(16),
+                  focusColor: scheme.primaryContainer,
+
                   items: _pageSizeOptions
                       .map(
                         (v) =>
                             DropdownMenuItem<int>(value: v, child: Text('$v')),
                       )
                       .toList(),
-                  onChanged: _isLoading
+                  onChanged: _isFileLoading
                       ? null
                       : (value) {
                           if (value == null || value == _rowsPerPage) return;
@@ -778,22 +956,22 @@ class _LogPageState extends State<LogPage> {
                 ),
               ],
             ),
-
-            // Nút Prev / Next
             Row(
               children: [
-                IconButton(
-                  onPressed: !_isLoading && currentPage > 0
-                      ? () => _changePage(currentPage - 1)
-                      : null,
+                IconButton.filledTonal(
+                  onPressed: _isFileLoading || currentPage <= 0
+                      ? null
+                      : () => _changePage(currentPage - 1),
                   icon: const Icon(Icons.chevron_left),
                   tooltip: 'Trang trước',
                 ),
+                const SizedBox(width: 4),
                 Text('${currentPage + 1}', style: theme.textTheme.bodyMedium),
-                IconButton(
-                  onPressed: !_isLoading && currentPage < pageCount - 1
-                      ? () => _changePage(currentPage + 1)
-                      : null,
+                const SizedBox(width: 4),
+                IconButton.filledTonal(
+                  onPressed: _isFileLoading || currentPage >= pageCount - 1
+                      ? null
+                      : () => _changePage(currentPage + 1),
                   icon: const Icon(Icons.chevron_right),
                   tooltip: 'Trang sau',
                 ),
