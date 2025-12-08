@@ -180,7 +180,7 @@ class _LogPageState extends State<LogPage> {
   // pagination
   int _rowsPerPage = 50;
   int _currentPage = 0; // 0-based
-  final List<int> _pageSizeOptions = [20, 50, 100, 200];
+  final List<int> _pageSizeOptions = [50, 100, 200, 500, 1000, 2000];
 
   // loading state
   bool _isFileLoading = false; // khi import CSV
