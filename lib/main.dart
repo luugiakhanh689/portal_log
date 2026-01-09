@@ -42,17 +42,18 @@ Map<String, dynamic> parseCsvInIsolate(String content) {
 
     final header = rows.first.map((e) => e.toString().trim()).toList();
 
-    int timestampIndex = header.indexWhere(
+    final timestampIndex = header.indexWhere(
       (h) => h.toLowerCase() == '@timestamp' || h.toLowerCase() == 'timestamp',
     );
-    int requestBodyIndex = header.indexWhere(
+    final requestBodyIndex = header.indexWhere(
       (h) => h.toLowerCase() == 'request_body',
     );
+    final userIdIndex = header.indexWhere((h) => h.toLowerCase() == 'user_id');
 
-    if (timestampIndex == -1 || requestBodyIndex == -1) {
+    if (timestampIndex == -1 || requestBodyIndex == -1 || userIdIndex == -1) {
       return {
         'error':
-            'Không tìm thấy cột "timestamp/@timestamp" hoặc "request_body" trong header CSV.',
+            'Không tìm thấy cột "timestamp/@timestamp" hoặc "request_body" hoặc "user_id" trong header CSV.',
         'logs': <Map<String, dynamic>>[],
       };
     }
@@ -62,17 +63,18 @@ Map<String, dynamic> parseCsvInIsolate(String content) {
     for (int i = 1; i < rows.length; i++) {
       final row = rows[i];
 
-      if (row.length <= math.max(timestampIndex, requestBodyIndex)) {
+      if (row.length <=
+          math.max(math.max(timestampIndex, requestBodyIndex), userIdIndex)) {
         continue;
       }
 
       final timestampRaw = row[timestampIndex]?.toString() ?? '';
       final requestBodyRaw = row[requestBodyIndex]?.toString() ?? '';
+      final userIdRaw = row[userIdIndex]?.toString() ?? '';
 
       if (requestBodyRaw.isEmpty) continue;
 
       try {
-        // chuẩn hoá double-quote
         final normalizedJson = requestBodyRaw.replaceAll('""', '"');
         final decoded = jsonDecode(normalizedJson);
 
@@ -97,13 +99,13 @@ Map<String, dynamic> parseCsvInIsolate(String content) {
 
           logs.add({
             'createdAt': timestampRaw,
+            'userId': userIdRaw,
             'typeData': typeData,
             'message': message,
             'genTime': genTime,
           });
         }
       } catch (_) {
-        // ignore 1 row lỗi
         continue;
       }
     }
@@ -180,7 +182,7 @@ class _LogPageState extends State<LogPage> {
   // pagination
   int _rowsPerPage = 50;
   int _currentPage = 0; // 0-based
-  final List<int> _pageSizeOptions = [50, 100, 200, 500, 1000, 2000];
+  final List<int> _pageSizeOptions = [50, 100, 200, 500, 1000];
 
   // loading state
   bool _isFileLoading = false; // khi import CSV
@@ -289,6 +291,7 @@ class _LogPageState extends State<LogPage> {
           .map(
             (m) => HeartbeatLogEntry(
               createdAt: m['createdAt'] as String,
+              userId: m['userId'] as String,
               typeData: m['typeData'] as int,
               message: m['message'] as String,
               genTime: m['genTime'] as int,
@@ -339,9 +342,9 @@ class _LogPageState extends State<LogPage> {
     final total = _filteredLogs.length;
 
     // Chuẩn bị headers và data cho TableHelper
-    final headers = ['created_at', 'gen_time', 'message'];
+    final headers = ['user_id', 'created_at', 'gen_time', 'message'];
     final data = _filteredLogs.map((log) {
-      return [log.createdAt, log.genTimeFormatted, log.message];
+      return [log.userId, log.createdAt, log.genTimeFormatted, log.message];
     }).toList();
 
     doc.addPage(
@@ -419,9 +422,10 @@ class _LogPageState extends State<LogPage> {
               ),
               // message rộng hơn
               columnWidths: const {
-                0: pw.FlexColumnWidth(2), // created_at
-                1: pw.FlexColumnWidth(2), // gen_time
-                2: pw.FlexColumnWidth(6), // message
+                0: pw.FlexColumnWidth(3), // user_id
+                1: pw.FlexColumnWidth(2), // created_at
+                2: pw.FlexColumnWidth(2), // gen_time
+                3: pw.FlexColumnWidth(7), // message
               },
             ),
           ];
@@ -445,9 +449,13 @@ class _LogPageState extends State<LogPage> {
     final searchLower = _searchText.toLowerCase();
 
     List<HeartbeatLogEntry> tmp = _allLogs.where((log) {
-      if (searchLower.isNotEmpty &&
-          !log.message.toLowerCase().contains(searchLower)) {
-        return false;
+      if (searchLower.isNotEmpty) {
+        final msg = log.message.toLowerCase();
+        final uid = log.userId.toLowerCase();
+
+        if (!msg.contains(searchLower) && !uid.contains(searchLower)) {
+          return false;
+        }
       }
 
       if (fromEpoch != null && log.genTime < fromEpoch) return false;
@@ -915,6 +923,16 @@ class _LogPageState extends State<LogPage> {
                       crossAxisAlignment: CrossAxisAlignment.center,
                       children: [
                         Expanded(
+                          flex: 3,
+                          child: Text(
+                            'user_id',
+                            style: theme.textTheme.labelLarge?.copyWith(
+                              fontWeight: FontWeight.bold,
+                              color: scheme.onPrimary,
+                            ),
+                          ),
+                        ),
+                        Expanded(
                           flex: 2,
                           child: Text(
                             'created_at',
@@ -991,6 +1009,11 @@ class _LogPageState extends State<LogPage> {
                               child: Row(
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
+                                  // user_id
+                                  Expanded(
+                                    flex: 3,
+                                    child: Text(log.userId, style: cellStyle),
+                                  ),
                                   // created_at
                                   Expanded(
                                     flex: 2,
