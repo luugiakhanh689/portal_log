@@ -33,6 +33,22 @@ Map<String, dynamic> parseCsvInIsolate(String content) {
     shouldParseNumbers: false,
   );
 
+  int indexOfAny(List<String> header, List<String> keys) {
+    final lowerKeys = keys.map((e) => e.toLowerCase()).toSet();
+    return header.indexWhere((h) => lowerKeys.contains(h.toLowerCase()));
+  }
+
+  String pickUserIdFromJson(Map<String, dynamic> decoded) {
+    // ưu tiên các key thường gặp
+    final v =
+        decoded['user_id'] ??
+        decoded['userId'] ??
+        decoded['uid'] ??
+        decoded['user'] ??
+        decoded['userID'];
+    return v?.toString() ?? '';
+  }
+
   try {
     final rows = converter.convert(content);
 
@@ -42,18 +58,20 @@ Map<String, dynamic> parseCsvInIsolate(String content) {
 
     final header = rows.first.map((e) => e.toString().trim()).toList();
 
-    final timestampIndex = header.indexWhere(
-      (h) => h.toLowerCase() == '@timestamp' || h.toLowerCase() == 'timestamp',
-    );
-    final requestBodyIndex = header.indexWhere(
-      (h) => h.toLowerCase() == 'request_body',
-    );
-    final userIdIndex = header.indexWhere((h) => h.toLowerCase() == 'user_id');
+    final timestampIndex = indexOfAny(header, ['@timestamp', 'timestamp']);
+    final requestBodyIndex = indexOfAny(header, [
+      'request_body',
+      'requestBody',
+    ]);
 
-    if (timestampIndex == -1 || requestBodyIndex == -1 || userIdIndex == -1) {
+    // user_id: OPTIONAL
+    final userIdIndex = indexOfAny(header, ['user_id', 'userId', 'userid']);
+
+    // Chỉ bắt buộc timestamp + request_body
+    if (timestampIndex == -1 || requestBodyIndex == -1) {
       return {
         'error':
-            'Không tìm thấy cột "timestamp/@timestamp" hoặc "request_body" hoặc "user_id" trong header CSV.',
+            'Không tìm thấy cột "timestamp/@timestamp" hoặc "request_body" trong header CSV.',
         'logs': <Map<String, dynamic>>[],
       };
     }
@@ -63,14 +81,17 @@ Map<String, dynamic> parseCsvInIsolate(String content) {
     for (int i = 1; i < rows.length; i++) {
       final row = rows[i];
 
-      if (row.length <=
-          math.max(math.max(timestampIndex, requestBodyIndex), userIdIndex)) {
-        continue;
-      }
+      // chỉ check đủ index bắt buộc
+      final requiredMax = math.max(timestampIndex, requestBodyIndex);
+      if (row.length <= requiredMax) continue;
 
       final timestampRaw = row[timestampIndex]?.toString() ?? '';
       final requestBodyRaw = row[requestBodyIndex]?.toString() ?? '';
-      final userIdRaw = row[userIdIndex]?.toString() ?? '';
+
+      // lấy userId từ CSV nếu có cột, không có thì rỗng
+      final userIdFromCsv = (userIdIndex != -1 && row.length > userIdIndex)
+          ? (row[userIdIndex]?.toString() ?? '')
+          : '';
 
       if (requestBodyRaw.isEmpty) continue;
 
@@ -79,8 +100,15 @@ Map<String, dynamic> parseCsvInIsolate(String content) {
         final decoded = jsonDecode(normalizedJson);
 
         if (decoded is! Map<String, dynamic>) continue;
+
         final logsList = decoded['logs'];
         if (logsList is! List) continue;
+
+        // fallback userId từ JSON top-level
+        final userIdFromJson = pickUserIdFromJson(decoded);
+        final baseUserId = userIdFromCsv.isNotEmpty
+            ? userIdFromCsv
+            : userIdFromJson;
 
         for (final item in logsList) {
           if (item is! Map<String, dynamic>) continue;
@@ -97,9 +125,15 @@ Map<String, dynamic> parseCsvInIsolate(String content) {
           final typeData = int.tryParse(typeDataRaw?.toString() ?? '0') ?? 0;
           final message = messageRaw.toString();
 
+          // nếu từng log item có userId riêng thì ưu tiên (optional)
+          final itemUserId =
+              item['user_id']?.toString() ??
+              item['userId']?.toString() ??
+              baseUserId;
+
           logs.add({
             'createdAt': timestampRaw,
-            'userId': userIdRaw,
+            'userId': itemUserId, // có thể là '' nếu không có ở đâu cả
             'typeData': typeData,
             'message': message,
             'genTime': genTime,
@@ -194,6 +228,8 @@ class _LogPageState extends State<LogPage> {
 
   // debounce search
   Timer? _searchDebounce;
+
+  bool _showUserIdColumn = true;
 
   // controller cho Scrollbar + ListView
   final ScrollController _tableScrollController = ScrollController();
@@ -299,11 +335,14 @@ class _LogPageState extends State<LogPage> {
           )
           .toList();
 
+      final hasAnyUserId = logs.any((e) => e.userId.trim().isNotEmpty);
+
       setState(() {
         _error = error;
         _allLogs = logs;
         _loadedFileName = file.name;
         _currentPage = 0;
+        _showUserIdColumn = hasAnyUserId;
       });
 
       _rebuildFilteredLogs();
@@ -922,16 +961,17 @@ class _LogPageState extends State<LogPage> {
                     child: Row(
                       crossAxisAlignment: CrossAxisAlignment.center,
                       children: [
-                        Expanded(
-                          flex: 3,
-                          child: Text(
-                            'user_id',
-                            style: theme.textTheme.labelLarge?.copyWith(
-                              fontWeight: FontWeight.bold,
-                              color: scheme.onPrimary,
+                        if (_showUserIdColumn)
+                          Expanded(
+                            flex: 3,
+                            child: Text(
+                              'user_id',
+                              style: theme.textTheme.labelLarge?.copyWith(
+                                fontWeight: FontWeight.bold,
+                                color: scheme.onPrimary,
+                              ),
                             ),
                           ),
-                        ),
                         Expanded(
                           flex: 2,
                           child: Text(
@@ -1010,10 +1050,11 @@ class _LogPageState extends State<LogPage> {
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
                                   // user_id
-                                  Expanded(
-                                    flex: 3,
-                                    child: Text(log.userId, style: cellStyle),
-                                  ),
+                                  if (_showUserIdColumn)
+                                    Expanded(
+                                      flex: 3,
+                                      child: Text(log.userId, style: cellStyle),
+                                    ),
                                   // created_at
                                   Expanded(
                                     flex: 2,
