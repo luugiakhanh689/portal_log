@@ -15,13 +15,11 @@ class HeartbeatLogEntry {
     required this.genTime,
   });
 
-  DateTime get genTimeDateTime => DateTime.fromMillisecondsSinceEpoch(
-    genTime * 1000,
-    isUtc: true,
-  ).toLocal();
+  DateTime get genTimeDateTime =>
+      DateTime.fromMillisecondsSinceEpoch(genTime, isUtc: true).toLocal();
 
   String get genTimeFormatted {
     final dt = genTimeDateTime;
-    return DateFormat('yyyy-MM-dd HH:mm:ss').format(dt);
+    return DateFormat('yyyy-MM-dd HH:mm:ss.SSS').format(dt);
   }
 }
