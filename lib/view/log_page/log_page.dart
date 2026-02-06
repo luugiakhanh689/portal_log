@@ -89,7 +89,7 @@ class _LogPageState extends State<LogPage> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                _filterHeaderView(scheme),
+                _headerView(scheme),
 
                 const SizedBox(height: 12),
 
@@ -175,7 +175,7 @@ class _LogPageState extends State<LogPage> {
         : const SizedBox(key: ValueKey('no_loading'), height: 4),
   );
 
-  Widget _filterHeaderView(ColorScheme scheme) => Row(
+  Widget _headerView(ColorScheme scheme) => Row(
     children: [
       FilledButton.icon(
         style: FilledButton.styleFrom(
