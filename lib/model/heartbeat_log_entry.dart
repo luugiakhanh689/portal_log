@@ -5,7 +5,8 @@ class HeartbeatLogEntry {
   final String userId; // cột user_id trong CSV
   final int typeData; // trong payload logs
   final String message; // trong payload logs
-  final int genTime; // seconds
+  final int genTime; // milliseconds
+  final String? error; // optional trong từng log item
 
   HeartbeatLogEntry({
     required this.createdAt,
@@ -13,7 +14,10 @@ class HeartbeatLogEntry {
     required this.typeData,
     required this.message,
     required this.genTime,
+    this.error,
   });
+
+  bool get hasError => (error ?? '').trim().isNotEmpty;
 
   DateTime get genTimeDateTime =>
       DateTime.fromMillisecondsSinceEpoch(genTime, isUtc: true).toLocal();
