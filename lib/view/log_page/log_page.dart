@@ -829,27 +829,16 @@ class _LogPageState extends State<LogPage> {
     final showUid = _showUserIdColumn;
     final hasAnyError = _filteredIndices.any((i) => _allLogs[i].hasError);
 
-    final headers = <String>[
-      if (showUid) 'user_id',
-      'created_at',
-      'gen_time',
-      if (hasAnyError) 'error',
-      'message',
-    ];
+    final headers = <String>['message'];
 
     final data = _filteredIndices.map((i) {
       final log = _allLogs[i];
-      return <String>[
-        if (showUid) log.userId,
-        log.createdAt,
-        log.genTimeFormatted,
-        if (hasAnyError) (log.error ?? ''),
-        log.message,
-      ];
+      return <String>[log.message];
     }).toList();
 
     doc.addPage(
       pw.MultiPage(
+        maxPages: 9999,
         pageFormat: PdfPageFormat.a4,
         margin: const pw.EdgeInsets.all(24),
         theme: pw.ThemeData.withFont(base: baseFont, bold: boldFont),
